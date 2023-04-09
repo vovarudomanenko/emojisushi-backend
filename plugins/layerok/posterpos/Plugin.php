@@ -1,19 +1,28 @@
 <?php namespace Layerok\PosterPos;
 
 use Backend;
+use File;
 use Illuminate\Support\Facades\Event;
+use Layerok\PosterPos\Console\ImportCategories;
+use Layerok\PosterPos\Console\CreatePaymentMethods;
+use Layerok\PosterPos\Console\CreateShippingMethods;
+use Layerok\PosterPos\Console\CreateUAHCurrency;
 use Layerok\PosterPos\Console\ImportData;
+use Layerok\PosterPos\Console\ImportIngredients;
+use Layerok\PosterPos\Console\ImportProducts;
+use Layerok\PosterPos\Console\ImportSpots;
+use Layerok\PosterPos\Console\ImportTablets;
 use Layerok\PosterPos\Models\Spot;
-use Layerok\Restapi\Http\Controllers\ProductController;
 use Maatwebsite\Excel\ExcelServiceProvider;
 use Maatwebsite\Excel\Facades\Excel;
 use OFFLINE\Mall\Controllers\Categories;
 use OFFLINE\Mall\Controllers\Products;
 use OFFLINE\Mall\Controllers\Variants;
 use OFFLINE\Mall\Models\Category;
-use OFFLINE\Mall\Models\PaymentMethod;
+use OFFLINE\Mall\Models\Customer;
 use OFFLINE\Mall\Models\Product;
 use OFFLINE\Mall\Models\Property;
+use OFFLINE\Mall\Models\PropertyGroup;
 use OFFLINE\Mall\Models\ShippingMethod;
 use OFFLINE\Mall\Models\Variant;
 use System\Classes\PluginBase;
@@ -48,7 +57,15 @@ class Plugin extends PluginBase
      */
     public function register()
     {
-        $this->registerConsoleCommand('posterpos.import', ImportData::class);
+        $this->registerConsoleCommand('poster.import', ImportData::class);
+        $this->registerConsoleCommand('poster.import-products', ImportProducts::class);
+        $this->registerConsoleCommand('poster.import-spots', ImportSpots::class);
+        $this->registerConsoleCommand('poster.import-tablets', ImportTablets::class);
+        $this->registerConsoleCommand('poster.import-categories', ImportCategories::class);
+        $this->registerConsoleCommand('poster.import-ingredients', ImportIngredients::class);
+        $this->registerConsoleCommand('poster.create-uah-currency', CreateUAHCurrency::class);
+        $this->registerConsoleCommand('poster.create-payment-methods', CreatePaymentMethods::class);
+        $this->registerConsoleCommand('poster.create-shipping-methods', CreateShippingMethods::class);
         App::register(ExcelServiceProvider::class);
         App::registerClassAlias('Excel',  Excel::class);
     }
@@ -62,14 +79,30 @@ class Plugin extends PluginBase
     {
 
         Event::listen('system.extendConfigFile', function ( $path, $config) {
-            if ($path === '/plugins/offline/mall/models/product/fields_edit.yaml') {
-                $config['tabs']['fields']['hide_products_in_spot'] = [
-                    'label' => 'Скрыть товары в заведении',
-                    'type' => 'relation',
-                    'tab' => 'offline.mall::lang.product.general'
+
+
+            if ($path === '/plugins/offline/mall/models/property/fields_pivot.yaml') {
+                $config['fields']['options']['form']['fields']['poster_id'] = [
+                    'label' => 'Poster ID',
+                    'type' => 'text',
+                    'span' => 'left'
                 ];
+                $config['fields']['options']['form']['fields']['value']['span'] = 'right';
                 return $config;
             }
+
+            if ($path === '/plugins/offline/mall/models/propertygroup/fields.yaml') {
+                $config['fields']['poster_id'] = [
+                    'label' => 'Poster ID',
+                    'type' => 'text',
+                    'span' => 'auto'
+                ];
+
+                return $config;
+            }
+
+
+
 
             if ($path === '/plugins/offline/mall/models/category/fields.yaml') {
                 $config['fields']['hide_categories_in_spot'] = [
@@ -78,18 +111,52 @@ class Plugin extends PluginBase
                 ];
                 return $config;
             }
+
+            if ($path === '/plugins/offline/mall/models/shippingmethod/fields.yaml') {
+                $config['fields']['code'] = [
+                    'label' => 'Code',
+                    'span' => 'auto'
+                ];
+                return $config;
+            }
+
+            if ($path === '/plugins/offline/mall/models/shippingmethod/columns.yaml') {
+                $config['columns']['code'] = [
+                    'label' => 'Code',
+                ];
+                return $config;
+            }
+
+
+            if ($path === '/plugins/offline/mall/models/product/columns.yaml' ||
+                $path === '/plugins/offline/mall/models/product/fields_create.yaml' ||
+                $path === '/plugins/offline/mall/models/product/fields_edit.yaml') {
+
+                if($path === '/plugins/offline/mall/models/product/fields_edit.yaml') {
+                    $config['tabs']['fields']['hide_products_in_spot'] = [
+                        'type' => 'relation',
+                        'tab' => 'offline.mall::lang.product.general'
+                    ];
+                }
+                $config['fields']['poster_id'] = [
+                    'label'   => 'layerok.posterpos::lang.extend.poster_id',
+                    'span' => 'left',
+                    'type' => 'text'
+                ];
+                return $config;
+            }
+
+
         });
         Event::listen('backend.form.extendFields', function ($widget) {
 
             if (!$widget->getController() instanceof Categories &&
-                !$widget->getController() instanceof Products  &&
                 !$widget->getController() instanceof Variants) {
                 return;
             }
 
             // Only for the User model
             if (!$widget->model instanceof Category &&
-                !$widget->model instanceof Product  &&
                 !$widget->model instanceof Variant) {
                 return;
             }
@@ -150,6 +217,19 @@ class Plugin extends PluginBase
 
         });
 
+
+        Event::listen('backend.page.beforeDisplay', function ( $backendController, $action, $params) {
+            // workaround, trick controller to look for the template outside the self plugin folder
+            if($backendController instanceof Products && $action === 'export') {
+                $backendController->addViewPath(File::normalizePath("plugins\\layerok\\posterpos\\controllers\\products"));
+            }
+       });
+
+        ShippingMethod::extend((function($model) {
+            $model->fillable[] = 'code';
+        }));
+
+
         Category::extend(function($model){
             $model->fillable[] = 'poster_id';
             $model->fillable[] = 'published';
@@ -165,6 +245,11 @@ class Plugin extends PluginBase
             ];
         });
 
+        Products::extend(function($controller) {
+           $controller->addDynamicProperty('importExportConfig', 'plugins/layerok/posterpos/models/product/config_import_export.yaml');
+           $controller->implement[] =  \Backend\Behaviors\ImportExportController::class;
+        });
+
         Product::extend(function($model){
             $model->fillable[] = 'poster_id';
             $model->belongsToMany['hide_products_in_spot'] = [
@@ -175,7 +260,16 @@ class Plugin extends PluginBase
             ];
         });
 
+        Variant::extend(function($model){
+            $model->fillable[] = 'poster_id';
+        });
+
         Property::extend(function($model){
+            $model->fillable[] = 'poster_id';
+            $model->fillable[] = 'poster_type'; // dish or product
+        });
+
+        PropertyGroup::extend(function($model){
             $model->fillable[] = 'poster_id';
         });
 
@@ -218,6 +312,11 @@ class Plugin extends PluginBase
                         'label' => 'Import',
                         'icon' => 'icon-upload',
                         'url' => Backend::url('layerok/posterpos/import')
+                    ],
+                    'posterpos-sync' => [
+                        'label' => 'Sync',
+                        'icon' => 'icon-upload',
+                        'url' => Backend::url('layerok/posterpos/sync')
                     ]
                 ]
             ],

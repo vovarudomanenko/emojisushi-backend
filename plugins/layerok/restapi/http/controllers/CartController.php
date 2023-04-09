@@ -9,6 +9,7 @@ use OFFLINE\Mall\Classes\Exceptions\OutOfStockException;
 use OFFLINE\Mall\Models\Cart;
 use OFFLINE\Mall\Models\CartProduct;
 use OFFLINE\Mall\Models\Product;
+use OFFLINE\Mall\Models\Variant;
 
 class CartController extends Controller
 {
@@ -28,6 +29,7 @@ class CartController extends Controller
     public function add(): JsonResponse
     {
         $product_id = input('product_id');
+        $variant_id = input('variant_id');
         $quantity = input('quantity');
 
         request()->validate([
@@ -36,18 +38,21 @@ class CartController extends Controller
 
         $product = Product::published()->findOrFail($product_id);
 
+        $variant = Variant::where('id', $variant_id)->first();
+
         $cart = Cart::bySession();
 
         $cartProduct = CartProduct::where([
             ['cart_id', $cart->id],
-            ['product_id', $product_id]
+            ['product_id', $product->id],
+            ['variant_id', $variant->id ?? null]
         ])->first();
 
         try {
             if($cartProduct && $cartProduct->quantity + (int)$quantity <= 0) {
                 $cart->removeProduct($cartProduct);
             } else {
-                $cart->addProduct($product, $quantity);
+                $cart->addProduct($product, $quantity, $variant);
             }
 
         } catch (OutOfStockException $e) {
@@ -108,10 +113,16 @@ class CartController extends Controller
 
     public function prepareProducts($cart) {
         return $cart->products()->with([
+            'variant',
+            'variant.property_values',
+            'variant.additional_prices',
+            'variant.prices',
             'product.image_sets',
             'product.prices',
             'product.additional_prices',
-            'product.property_values',
+            'product.property_values' => function($query) {
+                $query->where('value', '1');
+            },
         ])->get()->each(function($p) {
             $p->hidden = [];
             $p->price_formatted = $p->product->price()->price_formatted;

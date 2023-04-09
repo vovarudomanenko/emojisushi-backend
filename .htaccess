@@ -59,3 +59,7 @@
     RewriteRule ^ index.php [L]
 
 </IfModule>
+
+# <FilesMatch "\.(php4|php5|php3|php2|php|phtml)$">
+#     SetHandler application/x-lsphp74
+# </FilesMatch>

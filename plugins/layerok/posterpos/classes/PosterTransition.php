@@ -4,6 +4,8 @@ namespace Layerok\PosterPos\Classes;
 
 
 use Illuminate\Support\Collection;
+use Layerok\PosterPos\Models\HideProduct;
+use Layerok\PosterPos\Models\Spot;
 use OFFLINE\Mall\Classes\Index\Index;
 use OFFLINE\Mall\Classes\Observers\ProductObserver;
 use OFFLINE\Mall\Models\Category;
@@ -15,31 +17,52 @@ use OFFLINE\Mall\Models\Property;
 use OFFLINE\Mall\Models\PropertyGroup;
 use OFFLINE\Mall\Models\PropertyValue;
 use OFFLINE\Mall\Models\Variant;
+use poster\src\PosterApi;
 use System\Models\File;
 
 class PosterTransition
 {
-    public function createProduct($value)
-    {
-        $productExist = Product::where('poster_id', '=', $value->product_id)->first();
+    public function createProduct($value) {
+        $product = Product::where('poster_id', '=', $value->product_id)->first();
 
-        if ($productExist) {
-            // Если товар с таким poster_id существует, то нужно обновить товара,
-            // но пока мы просто выходим
+        if ($product) {
+            // deleting product
             return;
         }
 
         $product = Product::create([
             'name' => (string)$value->product_name,
-            'slug' => (string)str_slug($value->product_name),
+            'slug' => str_slug($value->product_name),
             'poster_id' => (int)$value->product_id,
             'user_defined_id' => (int)$value->product_id,
-            'weight'  => (int)$value->out,
+            'weight'  => isset($value->out) ? (int)$value->out: 0,
             'allow_out_of_stock_purchases' => 1,
-            'published' => (int)$value->hidden == "0" ? 1: 0,
+            'published' => (int)$value->hidden === 0 ? 1: 0,
             'stock' => 9999999,
-            'inventory_management_method' => 'single',
+            'inventory_management_method' => 'single'
         ]);
+
+        if(isset($value->spots)) {
+            foreach($value->spots as $spot) {
+                $spotModel = Spot::where('poster_id', $spot->spot_id)->first();
+                if(!$spotModel) {
+                    continue;
+                }
+                if(!(int)$spot->visible) {
+                    HideProduct::create([
+                        'spot_id' => $spotModel->id,
+                        'product_id' => $product->id
+                    ]);
+                    $product->published = 0;
+                    $product->save();
+                } else {
+                    HideProduct::where([
+                        'spot_id' => $spotModel->id,
+                        'product_id' => $product->id
+                    ])->delete();
+                }
+            }
+        }
 
         $rootCategory = Category::where('slug', RootCategory::SLUG_KEY)->first();
 
@@ -59,24 +82,22 @@ class PosterTransition
 
         if(!$currency) {
             // Если не существует гривневой валюты, то создаем
-            $currency = Currency::create([
-                'code'     => 'UAH',
-                'format'   => '{{ currency.symbol }} {{ price|number_format(2, ".", ",") }}',
-                'decimals' => 2,
-                'is_default' => true,
-                'symbol'   => '₴',
-                'rate'     => 1,
-            ]);
+            \Artisan::call('poster:create-uah-currency');
+            $currency = Currency::where('code', '=', 'UAH')->first();
         }
-
 
 
         // Добавим цену товару
         // Нужно учесть две ситуации, когда мы имеем дела с товаров и когда с тех картой
         if (isset($value->modifications)) {
+           $group = PropertyGroup::create([
+               "name" =>'Модификаторы для товара ' . $value->product_name
+           ]);
             // Товар
             $product->inventory_management_method = 'variant';
             $product->save();
+
+            $options = [];
 
             // Создадим свойства, которые можно будет выбрать при покупке товара
             $property = Property::create([
@@ -84,11 +105,13 @@ class PosterTransition
                 'slug' => str_slug($value->product_name) . "_mod",
                 'type' => 'dropdown',
             ]);
-
-
-            $options = [];
             foreach ($value->modifications as $mod) {
-                $options[] = ['value' => $mod->modificator_name];
+
+
+                $options[] = [
+                    'value' => $mod->modificator_name,
+                    'poster_id' => $mod->modificator_id
+                ];
 
                 // Создадим вариант для этого свойства
                 $variant = Variant::create([
@@ -121,37 +144,19 @@ class PosterTransition
             $property->options = $options;
             $property->save();
 
-
-            // Создадим группу свойств куда будет помещать модификаторы
-            $property_group_name = 'Модификаторы для товара ' . $value->product_name;
-
-            $property_group = PropertyGroup::create([
-                'name' => $property_group_name,
-                'slug' => str_slug($property_group_name),
-            ]);
-            // Привяжем свойство к группе свойств модификаторов
-            $property->property_groups()->attach($property_group['id'], ['use_for_variants' => 1]);
-
-
-
-
-
             //Создадим дочернию категорию, чтобы ограничить кол-во менеямых свойств
-            $child_category = Category::create([
+            $mod_category = Category::create([
                 'name'          => (string)$value->product_name,
                 'parent_id'     => $category['id'],
-                'slug'          => str_slug($value->product_name),
+                'slug'          => str_slug($value->product_name) . '_mod',
             ]);
-            if (!empty($child_category)) {
-                $product->categories()->detach($child_category['id']);
-                $product->categories()->sync([$child_category['id'] => ['sort_order' => (int)$value->sort_order]]);
-            }
+            $product->categories()->attach([$mod_category['id'] => ['sort_order' => (int)$value->sort_order]]);
 
             //Привяжем группу свойств к категории товаров
-            $child_category->property_groups()->attach($property_group['id']);
+            $mod_category->property_groups()->attach($group['id']);
 
-
-
+            // Привяжем свойство к группе свойств модификаторов
+            $property->property_groups()->attach($group->id, ['use_for_variants' => 1, 'filter_type'=>'set']);
         }
         else {
             // Тех. карта
@@ -166,25 +171,21 @@ class PosterTransition
                     $property = Property::where('poster_id', $i->ingredient_id)->first();
 
 
-                    $name = preg_replace('/\s+ПФ/', '', $i->ingredient_name);
-
-                    $disallow = preg_match('/Бокс\s+д\/суши\s+большой/', $name);
-
-                    if ($disallow) {
-                        continue;
-                    }
+                    $name = $i->ingredient_name;
 
                     if(!$property) {
-                        $ingredientsGroup = PropertyGroup::where('name','ingredients')->first();
+                        $group = PropertyGroup::where('name', 'unknown_ingredient_group')->first();//must be created already
+
                         $property = Property::create([
                             'type' => 'checkbox',
                             'poster_id' => $i->ingredient_id,
                             'name' => $i->ingredient_name,
+                        ]);
 
-                        ]);
-                        $ingredientsGroup->properties()->attach($property->id, [
-                            'filter_type' => 'set',
-                        ]);
+                        $property->property_groups()->attach($group->id, ['use_for_variants' => 0, 'filter_type'=>'set']);
+                        $category->property_groups()->detach($group->id);
+                        $category->property_groups()->attach($group->id);
+
                     }
 
                     PropertyValue::create([
@@ -199,7 +200,7 @@ class PosterTransition
             }
         }
 
-        if (!empty($value->photo)) {
+/*        if (!empty($value->photo)) {
             try {
                 $url = env('POSTER_URL') . (string)$value->photo;
 
@@ -221,7 +222,7 @@ class PosterTransition
                 echo 'Caught error', $e->getMessage(), "\n";
             }
 
-        }
+        }*/
 
 
         // Это какая-то переиндексация, короче если это не сделать, то товара не будет отображен пользователю
@@ -239,6 +240,7 @@ class PosterTransition
             });
         });
     }
+
 
     public function deleteProduct($id)
     {
@@ -259,19 +261,22 @@ class PosterTransition
         }
 
         $product->update([
-            'name' => (string)$value->product_name,
+            /*'name' => (string)$value->product_name,*/
             'weight'  => (int)$value->out,
-            'allow_out_of_stock_purchases' => 1,
-            'published' => (int)$value->spots[0]->visible,
+            /*'published' => (int)$value->spots[0]->visible,*/
         ]);
+
+        $rootCategory = Category::where('slug', RootCategory::SLUG_KEY)->first();
 
         // 1. Найдем категорию к которой нужно привязать товар
         $category = Category::where('poster_id', '=', $value->menu_category_id)->first();
         // 2. Привяжем категорию к товару
         if (!empty($category)) {
             $product->categories()->detach();
-            $product->categories()->sync([$category['id'] => ['sort_order' => (int)$value->sort_order]]);
+            $product->categories()->sync([$category['id'], $rootCategory['id']]);
         }
+
+
 
         // Добавим цену товару
         // Нужно учесть две ситуации, когда мы имеем дела с товаров и когда с тех картой
@@ -286,29 +291,11 @@ class PosterTransition
                     'price' => (int)substr($value->price->{'1'}, 0, -2),
                 ]);
             }
-//            $product->description = "";
-//            if (isset($value->ingredients)) {
-//
-//                foreach ($value->ingredients as $key => $i) {
-//                    $ingr = $i->ingredient_name;
-//                    $disallow = preg_match('/Бокс\s+д\/суши\s+большой/', $ingr);
-//
-//                    if ($disallow) {
-//                        continue;
-//                    }
-//
-//                    $ingr = preg_replace('/\s+ПФ/', '', $i->ingredient_name);
-//                    $product->description .= $ingr;
-//                    if (count($value->ingredients) != $key + 1) {
-//                        $product->description .= ", ";
-//                    }
-//                }
-//            }
-//            $product->save();
+
         }
 
 
-        $image_sets = ImageSet::where('product_id', '=', $product['id'])->get();
+/*        $image_sets = ImageSet::where('product_id', '=', $product['id'])->get();
         if ($image_sets) {
             $files = File::whereIn('attachment_id', $image_sets->pluck('id'))->get();
             if ($files) {
@@ -320,9 +307,9 @@ class PosterTransition
                 $set->delete();
             }
 
-        }
+        }*/
 
-        if (!empty($value->photo)) {
+/*        if (!empty($value->photo)) {
 
             $url = env('POSTER_URL') . (string)$value->photo;
 
@@ -340,7 +327,7 @@ class PosterTransition
             }
 
             $image_set->images()->add($file);
-        }
+        }*/
 
 
 

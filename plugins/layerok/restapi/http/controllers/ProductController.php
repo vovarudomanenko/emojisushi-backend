@@ -24,7 +24,7 @@ class ProductController extends Controller
     public $categories;
     public $category;
     public $filter;
-    public $includeChildren;
+    public $includeChildren = true;
     public $perPage = 25;
     public $pageNumber = 1;
     public $includeVariants = false;
@@ -38,7 +38,7 @@ class ProductController extends Controller
         $this->offset = input('offset');
         $this->limit = input('limit');
         $this->wishlist_only = input('wishlist');
-        $this->includeChildren = input('include_children');;
+/*        $this->includeChildren = input('include_children');;*/
         $this->category = $this->getCategory();
         $this->filter = input('filter');
 
@@ -169,6 +169,9 @@ class ProductController extends Controller
     protected function productIncludes(): array
     {
         return [
+            'variants',
+            'variants.property_values',
+            'variants.additional_prices',
             'image_sets',
             'prices',
             'additional_prices',

@@ -7,6 +7,7 @@ use DB;
 use Illuminate\Support\Collection;
 use Layerok\PosterPos\Models\HideCategory;
 use Layerok\PosterPos\Models\HideProduct;
+use Layerok\Restapi\Classes\FuzzySearch;
 use October\Rain\Database\Schema\Blueprint;
 use October\Rain\Support\Facades\Schema;
 use OFFLINE\Mall\Classes\CategoryFilter\Filter;
@@ -184,12 +185,13 @@ class MySQL implements Index
             $idCol . ' as id',
             $otherIdCol . ' as other_id',
             'is_ghost',
+            'name'
         ]);
 
         $db->where('index', $index)->where('published', true);
 
         $this->applyHidden($db, $filters);
-        $this->applySearch($db);
+        // $this->applySearch($db);
 
         $filters = $this->applySpecialFilters($filters, $db);
 
@@ -208,10 +210,46 @@ class MySQL implements Index
 
         $items = $db->get()->toArray();
 
+        $items = $this->fuzzySearch($items);
+
         return [
             'items' => $items,
             'ids_in_wishlist' => $ids_in_wishlist
         ];
+    }
+
+    protected function fuzzySearch($items) {
+        $search = input('search');
+
+        if($search) {
+            $trimmed_search = trim($search);
+        }
+
+        if($search && $trimmed_search) {
+            $fuzzy = new FuzzySearch($trimmed_search, true);
+            $fuzzy->setSuggestionDistance(2);
+            $fuzzy->setIgnoreLength(3);
+
+            foreach ($items as $key => $item) {
+                $sentence = $fuzzy->search($item->name);
+
+                $everyWordHasSuggestion = true;
+
+                foreach($sentence->words() as $word) {
+                    $suggestions = $word->getSuggestions();
+                    if(count($suggestions) < 1) {
+                        $everyWordHasSuggestion = false;
+                        break;
+                    }
+                }
+
+                if(!$everyWordHasSuggestion) {
+                    unset($items[$key]);
+                }
+            }
+        }
+
+        return $items;
     }
 
     protected function applySearch($db) {

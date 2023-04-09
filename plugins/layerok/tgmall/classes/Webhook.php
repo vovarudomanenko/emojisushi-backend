@@ -2,18 +2,22 @@
 
 use Layerok\TgMall\Classes\Callbacks\CallbackQueryBus;
 use Layerok\TgMall\Classes\Callbacks\NoopHandler;
-use Layerok\TgMall\Features\Checkout\ConfirmOrderHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\ConfirmOrderHandler;
 use Layerok\Tgmall\Features\Cart\CartHandler;
 use Layerok\Tgmall\Features\Category\CategoryItemHandler;
 use Layerok\Tgmall\Features\Category\CategoryItemsHandler;
-use Layerok\TgMall\Features\Checkout\CheckoutHandler;
-use Layerok\TgMall\Features\Checkout\ChoseDeliveryMethodHandler;
-use Layerok\TgMall\Features\Checkout\ChosePaymentMethodHandler;
-use Layerok\TgMall\Features\Checkout\EnterPhoneHandler;
-use Layerok\TgMall\Features\Checkout\LeaveCommentHandler;
-use Layerok\TgMall\Features\Checkout\ListDeliveryMethodsHandler;
-use Layerok\TgMall\Features\Checkout\ListPaymentMethodsHandler;
-use Layerok\TgMall\Features\Checkout\PreConfirmOrderHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\CheckoutHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\ChoseDeliveryMethodHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\ChosePaymentMethodHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\EnterPhoneHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\LeaveCommentHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\ListDeliveryMethodsHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\ListPaymentMethodsHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\PreConfirmOrderHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\PreparePaymentChangeHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\UpdateSticksCounterHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\WishToLeaveCommentHandler;
+use Layerok\TgMall\Features\Checkout\Handlers\YesSticksHandler;
 use Layerok\TgMall\Features\Index\WebsiteHandler;
 use Layerok\Tgmall\Features\Product\AddProductHandler;
 use Layerok\TgMall\Features\Index\StartHandler;
@@ -31,6 +35,7 @@ use Telegram\Bot\Events\UpdateWasReceived;
 use Log;
 use Telegram\Bot\Exceptions\TelegramResponseException;
 use Telegram\Bot\Objects\Update;
+use Event;
 
 class Webhook
 {
@@ -41,6 +46,8 @@ class Webhook
 
     /** @var State */
     public $state;
+
+    public $handlerInfo;
 
     /** @var Api */
     protected $api;
@@ -70,26 +77,37 @@ class Webhook
 
     public function addCallbackQueryHandlers()
     {
+        $handlers = [
+            StartHandler::class,
+            WebsiteHandler::class,
+            CategoryItemsHandler::class,
+            CategoryItemHandler::class,
+            AddProductHandler::class,
+            CartHandler::class,
+            CheckoutHandler::class,
+            NoopHandler::class,
+            EnterPhoneHandler::class,
+            ChosePaymentMethodHandler::class,
+            ChoseDeliveryMethodHandler::class,
+            ListPaymentMethodsHandler::class,
+            ListDeliveryMethodsHandler::class,
+            LeaveCommentHandler::class,
+            PreConfirmOrderHandler::class,
+            ConfirmOrderHandler::class,
+            PreparePaymentChangeHandler::class,
+            YesSticksHandler::class,
+            UpdateSticksCounterHandler::class,
+            WishToLeaveCommentHandler::class,
+        ];
+
+        if($extended = Event::fire('tgmall.handlers.extend', [$handlers], true)) {
+            $handlers = $extended;
+        }
+
         CallbackQueryBus::instance()
             ->setTelegram($this->api)
-            ->addHandlers([
-                StartHandler::class,
-                WebsiteHandler::class,
-                CategoryItemsHandler::class,
-                CategoryItemHandler::class,
-                AddProductHandler::class,
-                CartHandler::class,
-                CheckoutHandler::class,
-                NoopHandler::class,
-                EnterPhoneHandler::class,
-                ChosePaymentMethodHandler::class,
-                ChoseDeliveryMethodHandler::class,
-                ListPaymentMethodsHandler::class,
-                ListDeliveryMethodsHandler::class,
-                LeaveCommentHandler::class,
-                PreConfirmOrderHandler::class,
-                ConfirmOrderHandler::class,
-            ]);
+            ->setWebhook($this)
+            ->addHandlers($handlers);
     }
 
     public function addListeners()
@@ -111,7 +129,7 @@ class Webhook
 
         if(!isset($this->telegramUser)) {
             \Log::error("User was not created. We can't go further without this");
-            $this->answerCallbackQuery($telegram, $update);
+            $this->answerCallbackQuery($update);
             return;
         }
 
@@ -120,7 +138,19 @@ class Webhook
             ->setTelegramUser($this->telegramUser)
             ->setUpdate($update);
 
+
+
+
         $this->state = $this->createState();
+        if($update->isType('callback_query')) {
+            $this->handlerInfo = CallbackQueryBus::instance()->parse($update);
+        }
+        $stop = Event::fire('tgmall.state.created', [$this], true);
+
+        if($stop) {
+            $this->answerCallbackQuery($update);
+            return;
+        }
 
         $is_maintenance = $this->checkMaintenanceMode(
             $this->api,
@@ -169,12 +199,17 @@ class Webhook
     public function createUser(Update $update) {
         $chat = $update->getChat();
 
+
         if($update->isType('callback_query')) {
             $from = $update->getCallbackQuery()
                 ->getFrom();
-        } else {
+        } else if($update->isType('message')) {
+
             $from = $update->getMessage()
                 ->getFrom();
+        } else {
+            Log::error('Update type is: ' . $update->detectType());
+            return null;
         }
 
 
@@ -241,12 +276,30 @@ class Webhook
     public function answerCallbackQuery($update)
     {
         try {
-            $this->api->answerCallbackQuery([
-                'callback_query_id' => $update->getCallbackQuery()->id,
-            ]);
+            if($update->isType('callback_query')) {
+                $this->api->answerCallbackQuery([
+                    'callback_query_id' => $update->getCallbackQuery()->id,
+                ]);
+            }
         } catch (TelegramResponseException $e) {
             Log::error($e);
         }
+    }
+
+    public function sendMessage($params) {
+        try {
+            $this->api->sendMessage(
+                array_merge($params, ['chat_id' => $this->getChatId()])
+            );
+        } catch (\Exception $e) {
+            \Log::error("Caught Exception ('{$e->getMessage()}')\n{$e}\n");
+        }
+
+    }
+
+    public function getChatId()
+    {
+        return $this->telegramUser->chat_id;
     }
 
 

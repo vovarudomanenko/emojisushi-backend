@@ -26,6 +26,7 @@ Route::group([
     Route::get('payments', [PaymentMethodController::class, 'all']);
     Route::get('ingredients', [IngredientController::class, 'all']);
     Route::prefix('order')->group(function() {
+        Route::post('handle', [OrderController::class, 'handle']);
         Route::post('place', [OrderController::class, 'place']);
     });
 

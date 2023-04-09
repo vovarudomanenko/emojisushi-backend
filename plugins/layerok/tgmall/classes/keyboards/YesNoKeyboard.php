@@ -14,10 +14,10 @@ class YesNoKeyboard extends InlineKeyboard
     public function build(): void
     {
         $this->append([
-            'text' => 'Да',
+            'text' => self::lang('buttons.yes'),
             'callback_data' => self::prepareCallbackData($this->vars['yes']['handler'])
         ])->append([
-            'text' => 'Нет',
+            'text' => self::lang('buttons.no'),
             'callback_data' => self::prepareCallbackData($this->vars['no']['handler'])
         ]);
     }
