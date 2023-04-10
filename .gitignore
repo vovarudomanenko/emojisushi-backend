@@ -4,6 +4,7 @@ composer.phar
 .idea
 .env
 .env.*.php
+.env.production
 .env.php
 auth.json
 php_errors.log

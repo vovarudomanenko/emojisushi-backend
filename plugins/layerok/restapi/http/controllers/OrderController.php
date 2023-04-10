@@ -14,16 +14,9 @@ use Layerok\PosterPos\Classes\PosterUtils;
 use Layerok\PosterPos\Models\Spot;
 use October\Rain\Exception\ValidationException;
 use OFFLINE\Mall\Classes\Customer\SignUpHandler;
-use OFFLINE\Mall\Classes\PaymentState\FailedState;
-use OFFLINE\Mall\Classes\PaymentState\PaidState;
-use OFFLINE\Mall\Classes\PaymentState\PendingState;
-use OFFLINE\Mall\Classes\PaymentState\RefundedState;
 use OFFLINE\Mall\Models\Cart;
-use OFFLINE\Mall\Models\Customer;
-use OFFLINE\Mall\Models\Order;
 use OFFLINE\Mall\Models\PaymentMethod;
 use OFFLINE\Mall\Models\ShippingMethod;
-use OFFLINE\Mall\Models\Wishlist;
 use poster\src\PosterApi;
 use RainLab\Location\Models\Country;
 use Telegram\Bot\Api;
@@ -36,6 +29,7 @@ use Maksa988\WayForPay\Domain\Client;
 class OrderController extends Controller
 {
     public $cart = null;
+    public static $WAYFORPAY_METHOD = 'wayforpay';
     public function place(): JsonResponse
     {
 
@@ -65,39 +59,39 @@ class OrderController extends Controller
         $payment = PaymentMethod::where('id', $payment_id)->first();
 
         $this->cart = Cart::bySession();
-        $this->cart->setPaymentMethod($payment);
-        $this->cart->setShippingMethod($shipping);
 
-        $customer = Customer::where('phone', $data['phone'])->first();
-        if(!$customer) {
-            $user = $this->registerGuest([
-                'firstname' => optional($data)['first_name'],
-                'lastname' => optional($data)['last_name'],
-                'email' => optional($data)['email']
-            ]);
-            $user->customer->phone = $data['phone'];
-            $user->customer->save();
-        } else {
-            Cart::transferSessionCartToCustomer($customer);
-            Wishlist::transferToCustomer($customer);
-        }
+//        currently, I don't want store orders with users
 
-        $this->cart->refresh();
-
-        $order = Order::fromCart($this->cart);
+//        $this->cart->setPaymentMethod($payment);
+//        $this->cart->setShippingMethod($shipping);
+//        $customer = Customer::where('phone', $data['phone'])->first();
+//        if(!$customer) {
+//            $user = $this->registerGuest([
+//                'firstname' => optional($data)['first_name'],
+//                'lastname' => optional($data)['last_name'],
+//                'email' => optional($data)['email']
+//            ]);
+//            $user->customer->phone = $data['phone'];
+//            $user->customer->save();
+//        } else {
+//            Cart::transferSessionCartToCustomer($customer);
+//            Wishlist::transferToCustomer($customer);
+//        }
+//        $this->cart->refresh();
+//        $order = Order::fromCart($this->cart);
 
         $products = $this->cart->products()->get();
 
-        $way_products = [];
-
-        if($payment->code === 'wayforpay') {
-            foreach ($products as $cartProduct) {
-                $way_products[] = new Product($cartProduct->product->name, ($cartProduct->price()->price / 100) * $cartProduct->quantity, $cartProduct->quantity);
-            }
-        }
-
         if (!count($products) > 0) {
             throw new ValidationException(['Ваш заказ пустой. Пожалуйста добавьте товар в корзину.']);
+        }
+
+        $way_products = [];
+
+        if($payment->code === self::$WAYFORPAY_METHOD) {
+            foreach ($products as $cartProduct) {
+                $way_products[] = new Product($cartProduct->product->name, ($cartProduct->price()->price / 100), $cartProduct->quantity);
+            }
         }
 
         $spot = $this->getSelectedSpot();
@@ -125,9 +119,8 @@ class OrderController extends Controller
 
         $tablet_id = $spot->tablet->tablet_id ?? env('POSTER_FALLBACK_TABLET_ID');
 
-        // todo: id for website, wayforpay, posterpos order must be the same
 
-        if(env('POSTER_SEND_ORDER_ENABLED')) {
+        //if(env('POSTER_SEND_ORDER_ENABLED')) {
             PosterApi::init();
             $result = (object)PosterApi::incomingOrders()
                 ->createIncomingOrder([
@@ -150,7 +143,9 @@ class OrderController extends Controller
                     $result->error => $poster_err
                 ]);
             }
-        }
+            $poster_order_id = $result->response->incoming_order_id;
+            //$order->order_number = $poster_order_id;
+        //}
 
         $token = optional($spot->bot)->token ?? env('TELEGRAM_FALLBACK_BOT_TOKEN');
         $chat_id = optional($spot->chat)->internal_id ?? env('TELEGRAM_FALLBACK_CHAT_ID');
@@ -158,7 +153,7 @@ class OrderController extends Controller
 
         $receipt = $this->getReceipt();
         $receipt
-            ->headline($this->t('new_order') . " #" . $order->order_number)
+            ->headline($this->t('new_order') . " #" . $poster_order_id)
             ->field('first_name', optional($data)['first_name'])
             ->field('last_name', optional($data)['last_name'])
             ->field('phone', $data['phone'])
@@ -182,7 +177,7 @@ class OrderController extends Controller
 
 
         $this->cart->delete();
-        if($payment->code === 'wayforpay') {
+        if($payment->code === self::$WAYFORPAY_METHOD) {
             $way_products = new ProductCollection($way_products);
             $client = new Client(
                 optional($data)['first_name'],
@@ -190,14 +185,15 @@ class OrderController extends Controller
                 optional($data)['email'],
                 optional($data)['phone']
             );
+            $total = $this->cart->totals()->totalPostTaxes() / 100;
 
             $form = WayForPay::purchase(
-                $order->order_number,
-                1,
+                $poster_order_id,
+                $total,
                 $client,
                 $way_products,
                 'UAH', null, 'UA', null,
-                env('WAYFORPAY_RETURN_URL'),
+                env('WAYFORPAY_RETURN_URL') . '?order_id=' . $poster_order_id,
                 env('WAYFORPAY_SERVICE_URL')
             )->getAsString($submitText = 'Pay', $buttonClass = 'btn btn-primary'); // Get html form as string
 
@@ -209,6 +205,7 @@ class OrderController extends Controller
 
         return response()->json([
             'success' => true,
+            'poster_order' => $result->response
         ]);
     }
 
@@ -281,42 +278,37 @@ class OrderController extends Controller
     }
 
     public function handle(Request $request){
-        Log::channel('single')->debug('wayforpay прислал ответ');
-
         $content = $request->getContent();
         $data = json_decode($content);
-        Log::info(json_encode($data));
 
         return WayForPay::handleServiceUrl($data, function (WayForPay\SDK\Domain\TransactionService $transaction, $success) {
             $order_number = $transaction->getOrderReference();
-            $order = Order::where('order_number' , $order_number)->first();
 
-            if(!$order) {
-                Log::error('Заказ №' . $order_number . ' не найден при обработке ответа от wayforpay');
+            // uncomment bellow code, when orders will be stored on website's side
+//            $order = Order::where('order_number' , $order_number)->first();
+//            if(!$order) {
+//                Log::error('Заказ №' . $order_number . ' не найден при обработке ответа от wayforpay');
+//                return $success();
+//            }
+//            if($transaction->isStatusApproved()) {
+//                $order->payment_state = PaidState::class;
+//            }else if($transaction->isStatusPending()) {
+//                $order->payment_state = PendingState::class;
+//            }else if($transaction->isStatusRefunded()) {
+//                $order->payment_state = RefundedState::class;
+//            } else {
+//                $order->payment_state = FailedState::class;
+//            }
+//            $order->save();
+
+            if($transaction->getReason()->isOK()) {
+                Log::channel('single')->debug('WayForPay transaction №' . $order_number . 'is ' . $transaction->getStatus());
                 return $success();
             }
+            $error = "[Error] WayForPay transaction №". $order_number . ":" . $transaction->getReason()->getMessage();
+            Log::error($error);
 
-            if($transaction->isStatusApproved()) {
-                $order->payment_state = PaidState::class;
-            }else if($transaction->isStatusPending()) {
-                $order->payment_state = PendingState::class;
-            }else if($transaction->isStatusRefunded()) {
-                $order->payment_state = RefundedState::class;
-            } else {
-                // todo: handle all wayforpay statuses
-                // but for time being all not existing statuses will be marked as failed
-                $order->payment_state = FailedState::class;
-            }
-            $order->save();
-            if(!$transaction->getReason()->isOK()) {
-                $error = "Ошибка при оплате заказа №". $order_number . ":" . $transaction->getReason()->getMessage();
-                Log::error($error);
-
-                return $error;
-            } else {
-
-                return $success();
-            }
+            return $error;
         });
 
     }

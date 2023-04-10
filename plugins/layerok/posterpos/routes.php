@@ -129,3 +129,23 @@ Route::post('/posterpos/webhook/handle', function () {
 
 });*/
 
+Route::get('/test/poster/order', function() {
+    PosterApi::init();
+    $result = (object)PosterApi::incomingOrders()
+        ->createIncomingOrder([
+            'spot_id' => 1,
+            'phone' => '+380669111095',
+            'products' => [
+                [
+                    'product_id' => 3,
+                    'count' => 1
+                ]
+            ],
+            'first_name' => $data['first_name'] ?? "",
+        ]);
+
+    $id = $result->response->incoming_order_id;
+
+    $foo = [];
+});
+
