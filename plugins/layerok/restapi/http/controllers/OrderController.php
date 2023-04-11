@@ -119,16 +119,20 @@ class OrderController extends Controller
 
         $tablet_id = $spot->tablet->tablet_id ?? env('POSTER_FALLBACK_TABLET_ID');
 
-
+//                    'spot_id' => 1,
+//                    'products' => [[
+//                        'product_id' => 3,
+//                        'count' => 1
+//                    ]],
         //if(env('POSTER_SEND_ORDER_ENABLED')) {
             PosterApi::init();
             $result = (object)PosterApi::incomingOrders()
                 ->createIncomingOrder([
                     'spot_id' => $tablet_id,
+                    'products' => $posterProducts->all(),
                     'phone' => $data['phone'],
                     'address' => $data['address'] ?? "",
                     'comment' => $poster_comment,
-                    'products' => $posterProducts->all(),
                     'first_name' => $data['first_name'] ?? "",
                 ]);
 
@@ -187,6 +191,8 @@ class OrderController extends Controller
             );
             $total = $this->cart->totals()->totalPostTaxes() / 100;
 
+            // ?XDEBUG_SESSION_START=true
+
             $form = WayForPay::purchase(
                 $poster_order_id,
                 $total,
@@ -194,7 +200,7 @@ class OrderController extends Controller
                 $way_products,
                 'UAH', null, 'UA', null,
                 env('WAYFORPAY_RETURN_URL') . '?order_id=' . $poster_order_id,
-                env('WAYFORPAY_SERVICE_URL')
+                env('WAYFORPAY_SERVICE_URL') . '?spot_id=' . $spot->id
             )->getAsString($submitText = 'Pay', $buttonClass = 'btn btn-primary'); // Get html form as string
 
             return response()->json([
@@ -281,8 +287,14 @@ class OrderController extends Controller
         $content = $request->getContent();
         $data = json_decode($content);
 
-        return WayForPay::handleServiceUrl($data, function (WayForPay\SDK\Domain\TransactionService $transaction, $success) {
+        $spot_id = $request->input('spot_id');
+        $spot = Spot::where('id', $spot_id)->first();
+
+        return WayForPay::handleServiceUrl($data, function (WayForPay\SDK\Domain\TransactionService $transaction, $success) use($spot, $data) {
             $order_number = $transaction->getOrderReference();
+            $amount = $transaction->getAmount();
+            $currency = $transaction->getCurrency();
+            $status = $transaction->getStatus();
 
             // uncomment bellow code, when orders will be stored on website's side
 //            $order = Order::where('order_number' , $order_number)->first();
@@ -300,9 +312,28 @@ class OrderController extends Controller
 //                $order->payment_state = FailedState::class;
 //            }
 //            $order->save();
+            $token = optional($spot->bot)->token ?? env('TELEGRAM_FALLBACK_BOT_TOKEN');
+            $chat_id = optional($spot->chat)->internal_id ?? env('TELEGRAM_FALLBACK_CHAT_ID');
+            $api = new Api($token);
 
             if($transaction->getReason()->isOK()) {
-                Log::channel('single')->debug('WayForPay transaction №' . $order_number . 'is ' . $transaction->getStatus());
+                if($transaction->isStatusApproved()) {
+                    $message = "✅ Успішний платіж на сайті https://emojisushi.com.ua \n\nСума: $amount $currency \nНомер замовлення: $order_number";
+                } else if($transaction->isStatusRefunded()) {
+                    $message = "Платіж повернуто \nСума: $amount $currency \nНомер замовлення: $order_number";
+                } else if ($transaction->isStatusDeclined()) {
+                    $message = "Платіж скасовано \nСума: $amount $currency \nНомер замовлення: $order_number";
+                } else if ($transaction->isStatusExpired()) {
+                    $message = "Час на оплату вичерпано \nСума: $amount $currency \nНомер замовлення: $order_number";
+                } else {
+                    $message = "Статус платежу: $status \nСума: $amount $currency \nНомер замовлення: $order_number";
+                }
+                $api->sendMessage([
+                    'text' => $message,
+                    'parse_mode' => "html",
+                    'chat_id' => $chat_id
+                ]);
+                Log::channel('single')->debug('WayForPay transaction №' . $order_number . 'is ' . $status);
                 return $success();
             }
             $error = "[Error] WayForPay transaction №". $order_number . ":" . $transaction->getReason()->getMessage();
