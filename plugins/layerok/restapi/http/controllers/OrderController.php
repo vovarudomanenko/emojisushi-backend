@@ -220,7 +220,6 @@ class OrderController extends Controller
             'email'                 => 'email|nullable',
             'shipping_method_id'    => 'exists:offline_mall_shipping_methods,id',
             'payment_method_id'     => 'exists:offline_mall_payment_methods,id',
-            'spot_id'               => 'exists:layerok_posterpos_cities,id'
         ];
 
         if(isset($data['shipping_method_id'])) {
@@ -242,7 +241,6 @@ class OrderController extends Controller
             'payment_method_id' => trans('layerok.restapi::validation.payment_method_exists'),
             'firstname.min' => trans('layerok.restapi::validation.firstname_min'),
             'lastname.min' => trans('layerok.restapi::validation.lastname_min'),
-            'spot_id' => trans('layerok.restapi::validation.spot_exists'),
         ];
 
         $validation = Validator::make($data, $rules, $messages);
