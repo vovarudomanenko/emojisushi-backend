@@ -38,7 +38,7 @@ class OrderController extends Controller
 
         $user = $jwtGuard->user();
         $cart = Cart::byUser($user);
-        $spot = Spot::find($data['spot_id']);
+        $spot = Spot::getMain();
 
         if (!$cart->products()->get()->count()) {
             throw new ValidationException([trans('layerok.restapi::validation.cart_empty')]);
